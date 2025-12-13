@@ -149,9 +149,19 @@ export class BinanceFuturesService {
     const totalBalance = roundNumber(toNumber(accountState.totalWalletBalance), 2)
 
     const history = await this.getTradesHistory(DEFAULT_HISTORY_LIMIT)
-    const closedTrades = history.filter((trade) => trade.status === 'closed')
-    const wins = closedTrades.filter((trade) => (trade.profit ?? 0) > 0)
-    const successRate = closedTrades.length === 0 ? 0 : (wins.length / closedTrades.length) * 100
+    
+    // Single pass to count closed trades and wins
+    let closedCount = 0
+    let winsCount = 0
+    for (const trade of history) {
+      if (trade.status === 'closed') {
+        closedCount++
+        if ((trade.profit ?? 0) > 0) {
+          winsCount++
+        }
+      }
+    }
+    const successRate = closedCount === 0 ? 0 : (winsCount / closedCount) * 100
 
     return {
       totalBalance,
