@@ -99,13 +99,19 @@ export default function Dashboard() {
       return activeTrades;
     }
     
+    // Create a lookup map for O(1) position access instead of O(n) for each trade
+    const positionMap = new Map<string, Position>();
+    accountInfo.positions.forEach(p => {
+      const key = `${p.symbol}-${p.side}`;
+      positionMap.set(key, p);
+    });
+    
     return activeTrades.map(trade => {
       const tradeSymbol = trade.symbol.replace('/', '');
       const tradeSide = trade.type === 'long' ? 'LONG' : 'SHORT';
+      const key = `${tradeSymbol}-${tradeSide}`;
       
-      const position = accountInfo.positions?.find(
-        p => p.symbol === tradeSymbol && p.side === tradeSide
-      );
+      const position = positionMap.get(key);
       
       if (position && position.unrealizedPnl !== undefined) {
         const notionalValue = trade.entryPrice * trade.quantity;
@@ -197,13 +203,14 @@ export default function Dashboard() {
       return [];
     }
 
+    // Single pass through closedTrades to calculate monthly profit
     const monthlyProfit: Record<number, number> = {};
-    closedTrades.forEach(t => {
-      if (t.exitTime) {
-        const month = new Date(t.exitTime).getMonth();
-        monthlyProfit[month] = (monthlyProfit[month] || 0) + (t.profit || 0);
+    for (const trade of closedTrades) {
+      if (trade.exitTime) {
+        const month = new Date(trade.exitTime).getMonth();
+        monthlyProfit[month] = (monthlyProfit[month] || 0) + (trade.profit || 0);
       }
-    });
+    }
 
     return Object.entries(monthlyProfit)
       .map(([month, profit]) => ({

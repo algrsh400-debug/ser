@@ -78,42 +78,60 @@ export default function StatsPage() {
     }
 
     const closedTrades = trades.filter(t => t.status === "closed");
-    const profits = closedTrades.map(t => t.profit || 0);
-    const winningTrades = profits.filter(p => p > 0);
-    const losingTrades = profits.filter(p => p < 0);
-
-    const pairStats: Record<string, { trades: number; profit: number }> = {};
-    closedTrades.forEach(t => {
-      if (!pairStats[t.symbol]) {
-        pairStats[t.symbol] = { trades: 0, profit: 0 };
-      }
-      pairStats[t.symbol].trades++;
-      pairStats[t.symbol].profit += t.profit || 0;
-    });
-
-    const pairData = Object.entries(pairStats)
-      .map(([pair, data]) => ({ pair, ...data }))
-      .sort((a, b) => b.profit - a.profit)
-      .slice(0, 5);
-
-    const months = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", 
-                    "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"];
-    const monthlyStats: Record<number, { profit: number; loss: number }> = {};
     
-    closedTrades.forEach(t => {
-      if (t.exitTime) {
-        const month = new Date(t.exitTime).getMonth();
+    // Single pass to collect all statistics
+    const pairStats: Record<string, { trades: number; profit: number }> = {};
+    const monthlyStats: Record<number, { profit: number; loss: number }> = {};
+    const dailyStats: Record<number, { trades: number; profit: number }> = {};
+    let winningTradesCount = 0;
+    let losingTradesCount = 0;
+
+    for (const trade of closedTrades) {
+      const profit = trade.profit || 0;
+      
+      // Track wins/losses
+      if (profit > 0) winningTradesCount++;
+      else if (profit < 0) losingTradesCount++;
+      
+      // Pair stats
+      if (!pairStats[trade.symbol]) {
+        pairStats[trade.symbol] = { trades: 0, profit: 0 };
+      }
+      pairStats[trade.symbol].trades++;
+      pairStats[trade.symbol].profit += profit;
+      
+      // Monthly and daily stats
+      if (trade.exitTime) {
+        const date = new Date(trade.exitTime);
+        const month = date.getMonth();
+        const day = date.getDay();
+        
         if (!monthlyStats[month]) {
           monthlyStats[month] = { profit: 0, loss: 0 };
         }
-        const profit = t.profit || 0;
         if (profit >= 0) {
           monthlyStats[month].profit += profit;
         } else {
           monthlyStats[month].loss += profit;
         }
+        
+        if (!dailyStats[day]) {
+          dailyStats[day] = { trades: 0, profit: 0 };
+        }
+        dailyStats[day].trades++;
+        dailyStats[day].profit += profit;
       }
-    });
+    }
+
+    // Process results
+    const months = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", 
+                    "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"];
+    const days = ["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
+
+    const pairData = Object.entries(pairStats)
+      .map(([pair, data]) => ({ pair, ...data }))
+      .sort((a, b) => b.profit - a.profit)
+      .slice(0, 5);
 
     const profitData = Object.entries(monthlyStats)
       .map(([month, data]) => ({
@@ -121,20 +139,6 @@ export default function StatsPage() {
         profit: Math.round(data.profit * 100) / 100,
         loss: Math.round(data.loss * 100) / 100,
       }));
-
-    const days = ["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
-    const dailyStats: Record<number, { trades: number; profit: number }> = {};
-    
-    closedTrades.forEach(t => {
-      if (t.exitTime) {
-        const day = new Date(t.exitTime).getDay();
-        if (!dailyStats[day]) {
-          dailyStats[day] = { trades: 0, profit: 0 };
-        }
-        dailyStats[day].trades++;
-        dailyStats[day].profit += t.profit || 0;
-      }
-    });
 
     const dailyData = Object.entries(dailyStats)
       .map(([day, data]) => ({
@@ -146,12 +150,12 @@ export default function StatsPage() {
     const pieData = [
       { 
         name: "صفقات رابحة", 
-        value: winningTrades.length, 
+        value: winningTradesCount, 
         color: "hsl(142, 76%, 36%)" 
       },
       { 
         name: "صفقات خاسرة", 
-        value: losingTrades.length, 
+        value: losingTradesCount, 
         color: "hsl(0, 84%, 60%)" 
       },
     ];

@@ -69,9 +69,6 @@ export type ClosePositionResult = {
 }
 
 export class BinanceFuturesService {
-  private accountPromise?: Promise<FuturesAccountInformation>
-  private positionPromise?: Promise<FuturesPositionRisk[]>
-
   constructor(
     private readonly client: FuturesBinanceClient,
     private readonly settings: BotSettings
@@ -90,7 +87,10 @@ export class BinanceFuturesService {
   }
 
   async getAccountState(): Promise<AccountState & { positions: (AccountPosition & { unrealizedPnl: number })[] }> {
-    const [account, positions] = await Promise.all([this.getAccountInfo(), this.getPositions()])
+    const [account, positions] = await Promise.all([
+      this.client.getAccountInfo(),
+      this.client.getPositionRisk()
+    ])
     const mapped = positions
       .map((position) => this.transformPosition(position))
       .filter((position): position is AccountPosition & { unrealizedPnl: number } => position !== null)
@@ -108,8 +108,10 @@ export class BinanceFuturesService {
   }
 
   async getActiveTrades(): Promise<Trade[]> {
-    const positions = await this.getPositions()
-    const stats = await this.getAccountInfo()
+    const [positions, stats] = await Promise.all([
+      this.client.getPositionRisk(),
+      this.client.getAccountInfo()
+    ])
     const dualSide = Boolean(stats.dualSidePosition)
 
     return positions
@@ -138,33 +140,56 @@ export class BinanceFuturesService {
   }
 
   async getSummaryStats() {
-    const [accountState, income] = await Promise.all([this.getAccountInfo(), this.getIncome24h()])
+    const [accountState, income, activeTradesCount] = await Promise.all([
+      this.client.getAccountInfo(),
+      this.getIncome24h(),
+      this.getActiveTrades().then(trades => trades.length)
+    ])
     const todayProfit = roundNumber(income.reduce((sum, item) => sum + toNumber(item.income), 0), 2)
     const totalBalance = roundNumber(toNumber(accountState.totalWalletBalance), 2)
-    const activeTrades = (await this.getActiveTrades()).length
 
     const history = await this.getTradesHistory(DEFAULT_HISTORY_LIMIT)
-    const closedTrades = history.filter((trade) => trade.status === 'closed')
-    const wins = closedTrades.filter((trade) => (trade.profit ?? 0) > 0)
-    const successRate = closedTrades.length === 0 ? 0 : (wins.length / closedTrades.length) * 100
+    
+    // Single pass to count closed trades and wins
+    let closedCount = 0
+    let winsCount = 0
+    for (const trade of history) {
+      if (trade.status === 'closed') {
+        closedCount++
+        if ((trade.profit ?? 0) > 0) {
+          winsCount++
+        }
+      }
+    }
+    const successRate = closedCount === 0 ? 0 : (winsCount / closedCount) * 100
 
     return {
       totalBalance,
       todayProfit,
       todayProfitPercent: totalBalance === 0 ? 0 : roundNumber((todayProfit / totalBalance) * 100, 2),
-      activeTrades,
+      activeTrades: activeTradesCount,
       successRate: roundNumber(successRate, 2),
     }
   }
 
   async getDetailedStats() {
-    const summary = await this.getSummaryStats()
-    const history = await this.getTradesHistory(DEFAULT_HISTORY_LIMIT * 2)
-    const closedTrades = history.filter((trade) => trade.status === 'closed')
+    // Fetch all required data in parallel to avoid duplicate work
+    const [accountState, income, activeTradesCount, history] = await Promise.all([
+      this.client.getAccountInfo(),
+      this.getIncome24h(),
+      this.getActiveTrades().then(trades => trades.length),
+      this.getTradesHistory(DEFAULT_HISTORY_LIMIT * 2)
+    ])
 
-    const totalTrades = closedTrades.length + summary.activeTrades
+    const todayProfit = roundNumber(income.reduce((sum, item) => sum + toNumber(item.income), 0), 2)
+    const totalBalance = roundNumber(toNumber(accountState.totalWalletBalance), 2)
+    
+    const closedTrades = history.filter((trade) => trade.status === 'closed')
     const wins = closedTrades.filter((trade) => (trade.profit ?? 0) > 0)
     const losses = closedTrades.filter((trade) => (trade.profit ?? 0) < 0)
+    const successRate = closedTrades.length === 0 ? 0 : (wins.length / closedTrades.length) * 100
+
+    const totalTrades = closedTrades.length + activeTradesCount
 
     const avgProfit = wins.length === 0 ? 0 : wins.reduce((sum, trade) => sum + (trade.profit ?? 0), 0) / wins.length
     const avgLoss = losses.length === 0 ? 0 : Math.abs(losses.reduce((sum, trade) => sum + (trade.profit ?? 0), 0) / losses.length)
@@ -173,7 +198,11 @@ export class BinanceFuturesService {
     const totalVolume = closedTrades.reduce((sum, trade) => sum + trade.entryPrice * trade.quantity, 0)
 
     return {
-      ...summary,
+      totalBalance,
+      todayProfit,
+      todayProfitPercent: totalBalance === 0 ? 0 : roundNumber((todayProfit / totalBalance) * 100, 2),
+      activeTrades: activeTradesCount,
+      successRate: roundNumber(successRate, 2),
       totalTrades,
       winRate: closedTrades.length === 0 ? 0 : roundNumber((wins.length / closedTrades.length) * 100, 2),
       avgProfit: roundNumber(avgProfit, 2),
@@ -190,7 +219,7 @@ export class BinanceFuturesService {
   }
 
   async closePositionByTradeId(tradeId: string): Promise<ClosePositionResult> {
-    const positions = await this.getPositions()
+    const positions = await this.client.getPositionRisk()
     const target = positions.find((position) => this.matchesTradeId(position, tradeId))
 
     if (!target) {
@@ -201,15 +230,18 @@ export class BinanceFuturesService {
   }
 
   async closeAllPositions(): Promise<ClosePositionResult[]> {
-    const positions = await this.getPositions()
-    const results: ClosePositionResult[] = []
-
-    for (const position of positions) {
+    const positions = await this.client.getPositionRisk()
+    
+    // Filter positions with non-zero quantity and close them in parallel
+    const positionsToClose = positions.filter(position => {
       const absQty = Math.abs(parseFloat(position.positionAmt))
-      if (absQty === 0) continue
-      const result = await this.closePosition(position)
-      results.push(result)
-    }
+      return absQty > 0
+    })
+
+    // Close all positions in parallel for better performance
+    const results = await Promise.all(
+      positionsToClose.map(position => this.closePosition(position))
+    )
 
     return results
   }
@@ -246,20 +278,6 @@ export class BinanceFuturesService {
       recordLog('error', `فشل إغلاق المركز ${formatDisplaySymbol(position.symbol)}`, message)
       return { success: false, symbol: position.symbol, positionSide: position.positionSide, error: message }
     }
-  }
-
-  private async getAccountInfo(): Promise<FuturesAccountInformation> {
-    if (!this.accountPromise) {
-      this.accountPromise = this.client.getAccountInfo()
-    }
-    return this.accountPromise
-  }
-
-  private async getPositions(): Promise<FuturesPositionRisk[]> {
-    if (!this.positionPromise) {
-      this.positionPromise = this.client.getPositionRisk()
-    }
-    return this.positionPromise
   }
 
   private matchesTradeId(position: FuturesPositionRisk, tradeId: string): boolean {
@@ -375,7 +393,7 @@ export class BinanceFuturesService {
 
   private async determineSymbolsForHistory(): Promise<string[]> {
     const preferred = this.settings.tradingPairs?.map((pair) => pairToSymbol(pair)).filter(Boolean) ?? []
-    const positions = await this.getPositions()
+    const positions = await this.client.getPositionRisk()
     const fromPositions = positions
       .map((position) => position.symbol)
       .filter((symbol, index, array) => array.indexOf(symbol) === index)
@@ -385,7 +403,7 @@ export class BinanceFuturesService {
   }
 
   private async buildLeverageMap(): Promise<Map<string, number>> {
-    const account = await this.getAccountInfo()
+    const account = await this.client.getAccountInfo()
     const map = new Map<string, number>()
     account.positions.forEach((position) => {
       const leverage = parseInt(position.leverage, 10) || 1
