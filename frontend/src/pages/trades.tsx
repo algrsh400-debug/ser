@@ -25,7 +25,7 @@ import {
   CheckCircle,
 } from "lucide-react";
 import type { Trade } from "@shared/schema";
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 
@@ -117,31 +117,37 @@ export default function TradesPage() {
   const isConnected = accountInfo?.connected || false;
 
   // Merge Binance positions with database trades to get trailing stop info
-  const enrichedPositions: EnrichedPosition[] = positions.map((pos) => {
-    // Find matching trade in database
-    const matchingTrade = activeTrades?.find(
-      (t) => t.symbol === pos.symbol && 
-             ((t.type === 'long' && pos.side === 'LONG') || (t.type === 'short' && pos.side === 'SHORT'))
-    );
-    
-    // Calculate profit percentage
-    const profitPercent = pos.side === 'LONG'
-      ? ((pos.unrealizedPnl / (pos.entryPrice * pos.quantity)) * 100)
-      : ((pos.unrealizedPnl / (pos.entryPrice * pos.quantity)) * 100);
-    
-    // Get highest profit (stored in highestPrice field)
-    // Valid profit percentages should be between 0 and 100 (typically much lower)
-    // A value of 0 means no profit tracked yet
-    const highestProfit = matchingTrade?.highestPrice || 0;
+  const enrichedPositions: EnrichedPosition[] = useMemo(() => {
+    // Create a lookup map for faster trade matching
+    const tradeMap = new Map<string, Trade>();
+    activeTrades?.forEach(trade => {
+      const key = `${trade.symbol}-${trade.type}`;
+      tradeMap.set(key, trade);
+    });
 
-    return {
-      ...pos,
-      profitPercent,
-      highestProfit,
-      trailingStopPrice: matchingTrade?.trailingStopPrice,
-      trailingStopActive: matchingTrade?.trailingStopActive,
-    };
-  });
+    return positions.map((pos) => {
+      const key = `${pos.symbol}-${pos.side === 'LONG' ? 'long' : 'short'}`;
+      const matchingTrade = tradeMap.get(key);
+      
+      // Calculate profit percentage
+      const profitPercent = pos.side === 'LONG'
+        ? ((pos.unrealizedPnl / (pos.entryPrice * pos.quantity)) * 100)
+        : ((pos.unrealizedPnl / (pos.entryPrice * pos.quantity)) * 100);
+      
+      // Get highest profit (stored in highestPrice field)
+      // Valid profit percentages should be between 0 and 100 (typically much lower)
+      // A value of 0 means no profit tracked yet
+      const highestProfit = matchingTrade?.highestPrice || 0;
+
+      return {
+        ...pos,
+        profitPercent,
+        highestProfit,
+        trailingStopPrice: matchingTrade?.trailingStopPrice,
+        trailingStopActive: matchingTrade?.trailingStopActive,
+      };
+    });
+  }, [positions, activeTrades]);
 
   const filteredPositions = enrichedPositions.filter((pos) => {
     const type = pos.side === 'LONG' ? 'long' : 'short';

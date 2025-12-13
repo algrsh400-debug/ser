@@ -25,7 +25,7 @@ export class FuturesBinanceClient {
   private readonly apiSecret: string
   private readonly baseUrl: string
   private readonly recvWindow: number
-  private signingKeyPromise?: Promise<CryptoKey>
+  private readonly signingKeyPromise: Promise<CryptoKey>
 
   constructor(options: BinanceClientOptions) {
     this.apiKey = options.apiKey
@@ -37,6 +37,15 @@ export class FuturesBinanceClient {
     } else {
       this.baseUrl = options.testnet ? FUTURES_TESTNET_BASE_URL : FUTURES_BASE_URL
     }
+
+    // Pre-initialize the signing key to avoid lazy initialization overhead
+    this.signingKeyPromise = crypto.subtle.importKey(
+      'raw',
+      textEncoder.encode(this.apiSecret),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign']
+    )
   }
 
   async getServerTime(): Promise<{ serverTime: number }> {
@@ -144,22 +153,8 @@ export class FuturesBinanceClient {
     }
   }
 
-  private async getSigningKey(): Promise<CryptoKey> {
-    if (!this.signingKeyPromise) {
-      this.signingKeyPromise = crypto.subtle.importKey(
-        'raw',
-        textEncoder.encode(this.apiSecret),
-        { name: 'HMAC', hash: 'SHA-256' },
-        false,
-        ['sign']
-      )
-    }
-
-    return this.signingKeyPromise
-  }
-
   private async sign(payload: string): Promise<string> {
-    const key = await this.getSigningKey()
+    const key = await this.signingKeyPromise
     const signature = await crypto.subtle.sign('HMAC', key, textEncoder.encode(payload))
     return bufferToHex(signature)
   }
